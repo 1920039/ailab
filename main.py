@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from openai import OpenAI
 
 st.set_page_config(page_title="전공적합성 검사", page_icon="Compass", layout="wide")
 
@@ -191,13 +192,29 @@ else:
 
 
 
+if st.button("AI에게 분석 요청하기(비밀번호 필요)", width='stretch'):
 
-from openai import OpenAI
-import streamlit as st
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    # 비번 입력해야 LLM 사용 가능하도록
+    PASSWORD = st.secrets["APP_PASSWORD"]  # secrets.toml에 저장
 
-if st.button("AI에게 분석 요청하기", width='stretch'):
+    if "auth" not in st.session_state:
+        st.session_state.auth = False
+
+    if not st.session_state.auth:
+        st.subheader("🔒 인증이 필요합니다")
+        pw = st.text_input("비밀번호를 입력하세요", type="password")
+        if st.button("로그인"):
+            if pw == PASSWORD:
+                st.session_state.auth = True
+                st.success("인증 성공! AI 기능을 사용할 수 있습니다.")
+            else:
+                st.error("비밀번호가 틀렸습니다.")
+        st.stop()  # 아래 코드 실행 방지
+
+
+
     checked_items = [q["text"] for q in QUESTIONS if st.session_state.responses.get(q["id"], False)]
     chosen_type = chosen
     prompt = f"""
