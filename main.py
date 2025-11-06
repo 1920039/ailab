@@ -6,30 +6,28 @@ from openai import OpenAI
 
 st.set_page_config(page_title="전공적합성 검사", page_icon="Compass", layout="wide")
 
-# 버튼 색상 지정
+# 버튼 스타일
 st.markdown(
     """
     <style>
-    /* 모든 Streamlit 버튼 공통 스타일 */
     div.stButton > button, div.stFormSubmitButton > button {
         width: 100%;
         height: 3em;
         border-radius: 8px;
-        background-color: #4B8BF5; /* 올바른 색상 코드 */
+        background-color: #4B8BF5;
         color: white;
         font-weight: 600;
         font-size: 1em;
         border: none;
     }
     div.stButton > button:hover, div.stFormSubmitButton > button:hover {
-        background-color: #3A6CD8; /* hover 시 살짝 어두운 파랑 */
+        background-color: #3A6CD8;
         transition: 0.2s;
     }
     </style>
     """,
     unsafe_allow_html=True
 )
-
 
 # -------------------------
 # 상수 정의
@@ -105,7 +103,6 @@ def render_type_description(t):
     items = data.get("items", [])
     if items:
         st.markdown("<br>".join(items), unsafe_allow_html=True)
-        #st.markdown("- " + "\n- ".join(items))
 
 # -------------------------
 # UI 시작
@@ -133,30 +130,25 @@ with st.form("question_form", clear_on_submit=False):
             )
     submitted = st.form_submit_button("결과 보기", width='stretch')
 
-# 제출 후 처리
+# 제출 후 처리 (수정 완료)
 if submitted:
     st.session_state.responses = {
         q["id"]: bool(st.session_state.get(f"q_{q['id']}", False))
         for q in QUESTIONS
     }
 
-# 결과 표시 (응답이 있을 때만)
-if st.session_state.responses:
-    # 점수 계산 (항상 최신 응답 기준)
+# 결과 표시
+if st.session_state.responses and any(st.session_state.responses.values()):
     scores = score_types(QUESTIONS, st.session_state.responses)
 
-    # 표 + 그래프 (동시에 계산)
     col1, col2 = st.columns([1, 2])
-
     with col1:
         st.markdown("### 타입별 점수")
-
         df_scores = pd.DataFrame([{"타입": t, "점수": scores[t]} for t in TYPE_ORDER])
-        st.dataframe(df_scores, width='stretch', height=246)
+        st.dataframe(df_scores, use_container_width=True, height=246)
 
     with col2:
         st.markdown("### 타입별 점수 방사형 그래프")
-
         labels = TYPE_ORDER
         values = [scores[t] for t in labels] + [scores[labels[0]]]
         angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist() + [0]
@@ -171,7 +163,6 @@ if st.session_state.responses:
         plt.tight_layout()
         st.pyplot(fig, width='content')
 
-    # 최종 결과
     ties, max_val = top_types(scores)
     if not ties:
         st.info("체크된 문항이 없습니다.")
@@ -186,68 +177,139 @@ if st.session_state.responses:
         st.markdown("---")
         render_type_description(chosen)
 
-else:
-    st.info("문항을 체크하고 **결과 보기** 버튼을 눌러주세요.")
+    # -------------------------
+    # AI 분석 요청 (중복/무한 호출 방지)
+    # -------------------------
+    st.markdown("---")
 
+    if not st.session_state.get("ai_mode", False):
+        if st.button("AI에게 분석 요청하기 (비밀번호 필요)", width='stretch'):
+            st.session_state.ai_mode = True
+            st.rerun()
+    else:
+        # 인증
+        if not st.session_state.get("auth", False):
+            st.subheader("인증이 필요합니다")
+            pw = st.text_input("비밀번호를 입력하세요", type="password", key="pw_input")
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                if st.button("로그인", key="login_btn", width='stretch'):
+                    if pw == st.secrets["APP_PASSWORD"]:
+                        st.session_state.auth = True
+                        st.success("인증 성공! AI 분석을 시작합니다.")
+                        st.rerun()
+                    else:
+                        st.error("비밀번호가 틀렸습니다.")
+            st.stop()
 
+        # 동점 처리
+        ties, max_val = top_types(scores)
+        if len(ties) > 1 and "chosen_type" not in st.session_state:
+            chosen_type = st.radio(
+                "동점 타입 중 하나를 선택하세요",
+                ties,
+                horizontal=True,
+                key="tie_radio_ai"
+            )
+            if st.button("선택 완료", key="confirm_type", width='stretch'):
+                st.session_state.chosen_type = chosen_type
+                st.rerun()
+            st.stop()
+        else:
+            chosen_type = st.session_state.get("chosen_type", ties[0])
 
+        checked_items = [q["text"] for q in QUESTIONS if st.session_state.responses.get(q["id"], False)]
+        prompt = f"""
+        사용자가 전공적합성 검사에서 {len(checked_items)}개 문항을 선택했습니다.
+        선택한 항목: {', '.join(checked_items)}
+        검사 결과 타입: {chosen_type} ({TYPE_DESCRIPTIONS[chosen_type]['title']})
+        이 사람의 성향에 맞는 전공, 진로, 학과 선택 조언을 전문적으로 분석해 주세요.
+        """
 
-if st.button("AI에게 분석 요청하기(비밀번호 필요)", width='stretch'):
+        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        # 첫 분석 결과 (한 번만)
+        if "ai_result" not in st.session_state:
+            with st.spinner("AI가 분석 중입니다..."):
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": "당신은 진로·적성 분석 전문가입니다. 구체적이고 친절한 조언을 해주세요."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.7,
+                        max_tokens=1000
+                    )
+                    st.session_state.ai_result = response.choices[0].message.content
+                except Exception as e:
+                    st.error(f"AI 호출 중 오류 발생: {e}")
+                    st.stop()
 
-    # 비번 입력해야 LLM 사용 가능하도록
-    PASSWORD = st.secrets["APP_PASSWORD"]  # secrets.toml에 저장
+        # === AI 분석 결과 출력 ===
+        st.markdown("### AI의 분석 결과")
+        st.markdown(st.session_state.ai_result)
 
-    if "auth" not in st.session_state:
-        st.session_state.auth = False
+        # === 대화 기록 초기화 ===
+        if "followup_history" not in st.session_state:
+            st.session_state.followup_history = []
 
-    if not st.session_state.auth:
-        st.subheader("🔒 인증이 필요합니다")
-        pw = st.text_input("비밀번호를 입력하세요", type="password")
-        if st.button("로그인"):
-            if pw == PASSWORD:
-                st.session_state.auth = True
-                st.success("인증 성공! AI 기능을 사용할 수 있습니다.")
-            else:
-                st.error("비밀번호가 틀렸습니다.")
-        st.stop()  # 아래 코드 실행 방지
+        # === 이전 대화 기록 출력 ===
+        if st.session_state.followup_history:
+            st.markdown("---")
+            st.markdown("### 이전 추가 질문 및 답변")
+            for i, (q, a) in enumerate(st.session_state.followup_history):
+                st.markdown(f"**Q{i+1}: {q}**")
+                st.markdown(a)
+                st.markdown("---")
 
-
-
-    checked_items = [q["text"] for q in QUESTIONS if st.session_state.responses.get(q["id"], False)]
-    chosen_type = chosen
-    prompt = f"""
-    사용자가 전공적합성 검사에서 {len(checked_items)}개 문항을 선택했습니다.
-    선택한 항목: {checked_items}
-    타입은 다음의 6개가 있습니다: "공학 기술적 성향", "자연과학적 성향", "인문 어문 교육적 성향", "예술 창의적 성향", "사회과학 글로벌 성향", "경제 효율지향적 성향".
-    검사 결과 타입: {chosen_type}
-    이 사람의 성향과 적합한 진로, 학과 선택 조언을 해 주세요.
-
-    """
-
-    with st.spinner("AI가 분석 중입니다..."):
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "당신은 진로·적성 분석 전문가입니다."},
-                {"role": "user", "content": prompt}
-            ]
+        # === 새 질문 입력 (중복 방지) ===
+        # 입력값은 st.session_state에서만 관리
+        followup_key = "pending_followup"
+        followup = st.text_input(
+            "AI에게 추가로 물어보고 싶은 점이 있나요?",
+            value=st.session_state.get(followup_key, ""),
+            key="followup_input",
+            placeholder="예: 이 타입에 맞는 진로를 더 구체적으로 알려주세요."
         )
 
-    st.markdown("### 💬 AI의 분석 결과")
-    st.write(response.choices[0].message.content)
+        # 입력값 저장
+        if followup != st.session_state.get(followup_key, ""):
+            st.session_state[followup_key] = followup
 
-    if st.button("AI에게 추가 질문하기", width='stretch'):
-        followup = st.text_input("무엇이 궁금한가요?", key="followup_input")
-        if followup:
-            followup_response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "당신은 진로·적성 분석 전문가입니다."},
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": response.choices[0].message.content},
-                    {"role": "user", "content": followup}
-                ]
-            )
-            st.write(followup_response.choices[0].message.content)
+        # 제출 버튼 추가 (중복 방지)
+        if st.button("질문 보내기", width='stretch', key="send_followup"):
+            if st.session_state.get(followup_key, "").strip():
+                user_question = st.session_state[followup_key].strip()
+
+                # LLM 호출 (1회만)
+                with st.spinner("답변 생성 중..."):
+                    try:
+                        messages = [
+                            {"role": "system", "content": "당신은 진로·적성 분석 전문가입니다."},
+                            {"role": "user", "content": prompt},
+                            {"role": "assistant", "content": st.session_state.ai_result},
+                        ]
+                        for q, a in st.session_state.followup_history:
+                            messages.append({"role": "user", "content": q})
+                            messages.append({"role": "assistant", "content": a})
+                        messages.append({"role": "user", "content": user_question})
+
+                        response = client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=messages
+                        )
+                        answer = response.choices[0].message.content
+
+                        # 기록 저장
+                        st.session_state.followup_history.append((user_question, answer))
+                        st.session_state[followup_key] = ""  # 입력창 비우기
+                        st.success("답변이 추가되었습니다!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"추가 질문 중 오류: {e}")
+            else:
+                st.warning("질문을 입력해주세요.")
+
+else:
+    st.info("문항을 체크하고 **결과 보기** 버튼을 눌러주세요.")
